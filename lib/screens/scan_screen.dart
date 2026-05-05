@@ -1,15 +1,13 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import '../widgets/shopscan_web_scanner.dart';
+import 'package:provider/provider.dart';
 
-import '../../core/constants/app_constants.dart';
-import '../../core/utils/auth_provider.dart';
-import '../../core/utils/cart_provider.dart';
-import '../../services/firestore_service.dart';
-import '../../models/transaction_model.dart';
-import '../../models/product_model.dart';
+import '../core/constants/app_constants.dart';
+import '../core/utils/auth_provider.dart';
+import '../core/utils/cart_provider.dart';
+import '../models/product_model.dart';
+import '../models/transaction_model.dart';
+import '../services/firestore_service.dart';
 import 'cart_screen.dart';
 
 class ScanScreen extends StatefulWidget {
@@ -19,683 +17,366 @@ class ScanScreen extends StatefulWidget {
   State<ScanScreen> createState() => _ScanScreenState();
 }
 
-class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
-  static const List<BarcodeFormat> _supportedBarcodeFormats = [
-    BarcodeFormat.code128,
-    BarcodeFormat.code39,
-    BarcodeFormat.code93,
-    BarcodeFormat.codabar,
-    BarcodeFormat.ean13,
-    BarcodeFormat.ean8,
-    BarcodeFormat.itf,
-    BarcodeFormat.upcA,
-    BarcodeFormat.upcE,
-    BarcodeFormat.qrCode,
-  ];
-
+class _ScanScreenState extends State<ScanScreen>
+    with SingleTickerProviderStateMixin {
+  // ── Services ────────────────────────────────────────────────────────────────
   final _firestoreService = FirestoreService();
-  final _manualController = TextEditingController();
 
-  MobileScannerController? _scannerController;
-  ShopScanWebScannerController? _webScannerController;
-
-  String? _lastBarcode;
-  String? _lastProductLabel;
+  // ── Scanner ──────────────────────────────────────────────────────────────────
+  late final MobileScannerController _scannerController;
   bool _isProcessing = false;
+  String? _lastScanned;
+
+  // ── Cart bounce animation ────────────────────────────────────────────────────
+  late final AnimationController _cartBounce;
+  late final Animation<double> _cartScale;
+
+  // ── Manual input ─────────────────────────────────────────────────────────────
+  final _manualController = TextEditingController();
   bool _showManualInput = false;
-  bool _isStartingScanner = false;
-  MobileScannerException? _scannerError;
-  String? _webScannerErrorMessage;
 
-  AnimationController? _cartBounceController;
-  Animation<double>? _cartBounceAnimation;
-
-  int _scannerSessionId = 0;
-
-  MobileScannerController _createScannerController({bool autoStart = true}) {
-    return MobileScannerController(
-      autoStart: autoStart,
-      detectionSpeed: DetectionSpeed.normal,
-      formats: _supportedBarcodeFormats,
-    );
-  }
+  // ── Status label ─────────────────────────────────────────────────────────────
+  String? _statusLabel;
 
   @override
   void initState() {
     super.initState();
 
-    if (kIsWeb) {
-      _webScannerController = ShopScanWebScannerController();
-      _isStartingScanner = true;
-    } else {
-      _scannerController = _createScannerController();
-    }
+    _scannerController = MobileScannerController(
+      detectionSpeed: DetectionSpeed.normal,
+      formats: const [
+        BarcodeFormat.ean13,
+        BarcodeFormat.ean8,
+        BarcodeFormat.code128,
+        BarcodeFormat.code39,
+        BarcodeFormat.code93,
+        BarcodeFormat.codabar,
+        BarcodeFormat.itf,
+        BarcodeFormat.upcA,
+        BarcodeFormat.upcE,
+        BarcodeFormat.qrCode,
+      ],
+    );
 
-    _cartBounceController = AnimationController(
+    _cartBounce = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 400),
     );
 
-    _cartBounceAnimation = TweenSequence<double>([
-      TweenSequenceItem(tween: Tween(begin: 1.0, end: 1.3), weight: 50),
-      TweenSequenceItem(tween: Tween(begin: 1.3, end: 1.0), weight: 50),
-    ]).animate(
-      CurvedAnimation(
-        parent: _cartBounceController!,
-        curve: Curves.easeInOut,
-      ),
-    );
+    _cartScale = TweenSequence<double>([
+      TweenSequenceItem(tween: Tween(begin: 1.0, end: 1.35), weight: 50),
+      TweenSequenceItem(tween: Tween(begin: 1.35, end: 1.0), weight: 50),
+    ]).animate(CurvedAnimation(parent: _cartBounce, curve: Curves.easeInOut));
   }
 
   @override
   void dispose() {
-    _cartBounceController?.dispose();
+    _scannerController.dispose();
+    _cartBounce.dispose();
     _manualController.dispose();
-    _scannerController?.dispose();
-    _webScannerController?.dispose();
     super.dispose();
   }
 
-  Future<void> _rebuildScannerControllerForRetry() async {
-    final currentController = _scannerController;
-
-    try {
-      await currentController?.stop();
-    } catch (_) {}
-
-    currentController?.dispose();
-
-    if (!mounted) return;
-
-    setState(() {
-      _scannerController = _createScannerController(autoStart: false);
-      _scannerSessionId++;
-      _scannerError = null;
-    });
-
-    await WidgetsBinding.instance.endOfFrame;
-    await _scannerController?.start();
-  }
-
-  Future<void> _rebuildWebScannerControllerForRetry() async {
-    final currentController = _webScannerController;
-
-    try {
-      await currentController?.stop();
-    } catch (_) {}
-
-    currentController?.dispose();
-
-    if (!mounted) return;
-
-    setState(() {
-      _webScannerController = ShopScanWebScannerController();
-      _scannerSessionId++;
-      _webScannerErrorMessage = null;
-    });
-
-    await WidgetsBinding.instance.endOfFrame;
-  }
-
-  Future<void> _startScanner({bool forceRestart = false}) async {
-    if (_isStartingScanner || !mounted) return;
-
-    setState(() {
-      _isStartingScanner = true;
-      _scannerError = null;
-      _webScannerErrorMessage = null;
-    });
-
-    try {
-      if (kIsWeb) {
-        if (forceRestart) {
-          await _rebuildWebScannerControllerForRetry();
-        }
-        return;
-      }
-
-      final controller = _scannerController;
-      if (controller == null) {
-        return;
-      }
-
-      if (forceRestart) {
-        await _rebuildScannerControllerForRetry();
-      } else {
-        await controller.start();
-      }
-    } on MobileScannerException catch (error) {
-      if (!mounted) return;
-      setState(() => _scannerError = error);
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _scannerError = const MobileScannerException(
-          errorCode: MobileScannerErrorCode.genericError,
-        );
-      });
-    } finally {
-      if (mounted) {
-        setState(() => _isStartingScanner = false);
-      }
-    }
-  }
-
-  Future<void> _toggleTorch() async {
-    if (kIsWeb) {
-      final controller = _webScannerController;
-      if (controller == null) return;
-
-      if (!controller.hasTorch.value) {
-        _showErrorSnack('Flashlight is not available on this device.');
-        return;
-      }
-
-      try {
-        await controller.toggleTorch();
-        if (mounted) setState(() {});
-      } catch (_) {
-        _showErrorSnack('Unable to change flashlight right now.');
-      }
-      return;
-    }
-
-    final controller = _scannerController;
-    if (controller == null) return;
-
-    final hasTorch = controller.hasTorchState.value;
-
-    if (hasTorch != true) {
-      _showErrorSnack('Flashlight is not available on this device.');
-      return;
-    }
-
-    try {
-      await controller.toggleTorch();
-      if (mounted) setState(() {});
-    } catch (_) {
-      _showErrorSnack('Unable to change flashlight right now.');
-    }
-  }
-
-  void _handleWebScannerStarted() {
-    if (!mounted) return;
-
-    setState(() {
-      _isStartingScanner = false;
-      _webScannerErrorMessage = null;
-    });
-  }
-
-  void _handleWebScannerError(String message) {
-    if (!mounted) return;
-
-    setState(() {
-      _isStartingScanner = false;
-      _webScannerErrorMessage = message;
-    });
-  }
-
-  String? _extractDetectedBarcodeValue(BarcodeCapture barcodeCapture) {
-    for (final detectedBarcode in barcodeCapture.barcodes) {
-      final rawValue = detectedBarcode.rawValue?.trim();
-      if (rawValue != null && rawValue.isNotEmpty) return rawValue;
-
-      final displayValue = detectedBarcode.displayValue?.trim();
-      if (displayValue != null && displayValue.isNotEmpty) return displayValue;
-    }
-
-    return null;
-  }
-
-  void _handleBarcodeDetection(BarcodeCapture barcodeCapture) {
-    debugPrint('DETECT EVENT TRIGGERED: ${barcodeCapture.barcodes.length}');
-
+  // ── Barcode detection callback ───────────────────────────────────────────────
+  void _onDetect(BarcodeCapture capture) {
     if (_isProcessing) return;
 
-    final barcode = _extractDetectedBarcodeValue(barcodeCapture);
+    for (final barcode in capture.barcodes) {
+      final value = (barcode.rawValue ?? barcode.displayValue ?? '').trim();
+      if (value.isEmpty) continue;
 
-    debugPrint('EXTRACTED BARCODE: $barcode');
+      debugPrint('SCANNER DETECTED');
+      debugPrint('BARCODE VALUE: $value');
 
-    if (barcode == null) return;
+      if (value == _lastScanned) return;
+      _lastScanned = value;
 
-    _handleDetectedBarcodeValue(barcode);
-  }
-
-  void _handleDetectedBarcodeValue(String barcode) {
-    if (_isProcessing) return;
-
-    final normalizedBarcode = barcode.trim();
-
-    if (normalizedBarcode.isEmpty) return;
-    if (normalizedBarcode == _lastBarcode) return;
-
-    debugPrint('SCANNED BARCODE: $normalizedBarcode');
-
-    if (mounted) {
-      setState(() {
-        _lastProductLabel = 'Detected barcode: $normalizedBarcode';
-      });
+      _processBarcode(value);
+      return;
     }
-
-    _lastBarcode = normalizedBarcode;
-    _processBarcode(normalizedBarcode);
   }
 
-  Future<bool> _ensureCashierOnDuty() async {
-    final authProvider = context.read<AuthProvider>();
-    final currentUser = authProvider.currentUser;
-
-    if (!authProvider.isCashier || currentUser == null) return true;
-
-    try {
-      final activeShift =
-          await _firestoreService.getActiveShiftForCashier(currentUser.id);
-
-      if (activeShift != null) return true;
-    } catch (_) {
-      if (!mounted) return false;
-
-      setState(() {
-        _lastProductLabel = 'Unable to confirm your shift right now';
-      });
-
-      _showErrorSnack('Unable to confirm your shift right now. Try again.');
-      return false;
-    }
-
-    if (!mounted) return false;
-
-    setState(() {
-      _lastProductLabel = 'Start your shift before scanning items';
-    });
-
-    await _showWarningDialog(
-      'Not On Duty',
-      'You need to start your shift before scanning items.',
-    );
-    return false;
-  }
-
+  // ── Core barcode processing ───────────────────────────────────────────────────
   Future<void> _processBarcode(String barcode) async {
-    if (!mounted) return;
-
-    final normalizedBarcode = barcode.trim();
-
-    if (normalizedBarcode.isEmpty) {
-      _lastBarcode = null;
-      return;
-    }
-
-    if (!await _ensureCashierOnDuty()) {
-      _resetLastBarcodeAfterDelay(
-        normalizedBarcode,
-        delay: const Duration(milliseconds: 500),
-      );
-      return;
-    }
-
-    final shopId = context.read<AuthProvider>().currentUser?.shopId;
-
-    debugPrint('SHOP ID: $shopId');
-
-    if (shopId == null || shopId.isEmpty) {
-      setState(() {
-        _isProcessing = false;
-        _lastProductLabel = 'No shop assigned to this account';
-      });
-
-      _resetLastBarcodeAfterDelay(normalizedBarcode);
-      await _showWarningDialog(
-        'No Shop Assigned',
-        'No shop is assigned to this account. Please contact your administrator.',
-      );
-      return;
-    }
+    if (!mounted || _isProcessing) return;
 
     setState(() => _isProcessing = true);
 
     try {
+      // 1. Check cashier shift
+      final auth = context.read<AuthProvider>();
+      final user = auth.currentUser;
+
+      if (auth.isCashier && user != null) {
+        final shift =
+            await _firestoreService.getActiveShiftForCashier(user.id);
+
+        if (shift == null) {
+          if (!mounted) return;
+          _setStatus('Start your shift first before scanning items.');
+          await _showWarning(
+            'Not On Duty',
+            'You need to start your shift before scanning items.',
+          );
+          return;
+        }
+      }
+
+      // 2. Resolve shop
+      final shopId = context.read<AuthProvider>().currentUser?.shopId;
+      debugPrint('CURRENT SHOP ID: $shopId');
+
+      if (shopId == null || shopId.isEmpty) {
+        _setStatus('No shop assigned to this account.');
+        await _showWarning(
+          'No Shop Assigned',
+          'No shop is assigned to this account. Contact your administrator.',
+        );
+        return;
+      }
+
+      // 3. Look up product
       final product = await _firestoreService.getProductByBarcode(
-        normalizedBarcode,
+        barcode,
         shopId: shopId,
       );
 
       if (!mounted) return;
 
       if (product == null) {
-        setState(() {
-          _isProcessing = false;
-          _lastProductLabel =
-              'Product not added: $normalizedBarcode is not in your inventory';
-        });
-
-        _resetLastBarcodeAfterDelay(normalizedBarcode);
-        await _showWarningDialog(
+        debugPrint('PRODUCT NOT FOUND: $barcode');
+        _setStatus('Barcode not found in inventory.');
+        await _showWarning(
           'Product Not Found',
-          'Barcode "$normalizedBarcode" was not found in your inventory.',
+          'Barcode "$barcode" was not found in your inventory.',
         );
         return;
       }
 
-      if (product.stock <= 0) {
-        setState(() {
-          _isProcessing = false;
-          _lastProductLabel =
-              'Product not added: ${product.name} is out of stock';
-        });
+      debugPrint('PRODUCT FOUND: ${product.name}');
 
-        _resetLastBarcodeAfterDelay(normalizedBarcode);
-        await _showWarningDialog(
+      if (product.stock <= 0) {
+        _setStatus('${product.name} is out of stock.');
+        await _showWarning(
           'Out of Stock',
           '${product.name} is currently out of stock.',
         );
         return;
       }
 
-      setState(() => _isProcessing = false);
+      // 4. Choose quantity
+      if (!mounted) return;
+      final qty = await _showQuantityPicker(product);
+      if (qty == null || !mounted) return;
 
-      final quantity = await _showQuantityPicker(product);
+      // 5. Add to cart
+      context.read<CartProvider>().addItem(TransactionItemModel(
+            productId: product.id,
+            productName: product.name,
+            price: product.price,
+            quantity: qty,
+            sku: product.barcode,
+            imageUrl: product.imageUrl,
+          ));
 
-      if (quantity == null || !mounted) {
-        _lastBarcode = null;
-        return;
-      }
+      _cartBounce.forward(from: 0);
+      _setStatus('Last: ${product.name} × $qty');
 
-      final item = TransactionItemModel(
-        productId: product.id,
-        productName: product.name,
-        price: product.price,
-        quantity: quantity,
-        sku: product.barcode,
-        imageUrl: product.imageUrl,
-      );
-
-      context.read<CartProvider>().addItem(item);
-
-      _cartBounceController?.forward(from: 0);
-
-      if (mounted) {
-        setState(() {
-          _lastProductLabel =
-              'Last: ${product.name} (₱${product.price.toStringAsFixed(2)})';
-        });
-
-        await _showSuccessDialog(product.name, quantity);
-      }
-
-      _lastBarcode = null;
-    } catch (e) {
+      await _showSuccess('Added to Cart!',
+          '${product.name} × $qty added to your cart.');
+    } finally {
       if (mounted) {
         setState(() {
           _isProcessing = false;
-          _lastProductLabel =
-              'Product not added: unable to check barcode right now';
+          _lastScanned = null;
         });
-
-        _resetLastBarcodeAfterDelay(normalizedBarcode);
-        _showErrorSnack('Error: ${e.toString()}');
       }
     }
   }
 
-  void _resetLastBarcodeAfterDelay(
-    String barcode, {
-    Duration delay = const Duration(milliseconds: 1200),
-  }) {
-    Future<void>.delayed(delay, () {
-      if (!mounted) return;
-
-      if (_lastBarcode == barcode) {
-        _lastBarcode = null;
-      }
-    });
+  // ── Status label helper ──────────────────────────────────────────────────────
+  void _setStatus(String msg) {
+    if (mounted) setState(() => _statusLabel = msg);
   }
 
-  void _showErrorSnack(String message) {
-    final messenger = ScaffoldMessenger.of(context);
-
-    messenger.hideCurrentSnackBar();
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text(message),
-        behavior: SnackBarBehavior.floating,
-        backgroundColor: const Color(AppColors.error),
-        duration: const Duration(seconds: 3),
-      ),
-    );
+  // ── Torch toggle ─────────────────────────────────────────────────────────────
+  Future<void> _toggleTorch() async {
+    try {
+      await _scannerController.toggleTorch();
+      if (mounted) setState(() {});
+    } catch (_) {}
   }
 
-  Widget _buildScannerErrorView(MobileScannerException error) {
-    return Container(
-      color: Colors.black,
-      child: Center(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 28),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const Icon(
-                Icons.camera_alt_outlined,
-                size: 64,
-                color: Colors.white54,
-              ),
-              const SizedBox(height: 16),
-              Text(
-                'Scanner Unavailable',
-                style: Theme.of(context)
-                    .textTheme
-                    .bodyLarge
-                    ?.copyWith(color: Colors.white),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'The scanner could not start. Check camera permission, then tap Retry Camera.',
-                textAlign: TextAlign.center,
-                style: Theme.of(context)
-                    .textTheme
-                    .bodySmall
-                    ?.copyWith(color: Colors.white70),
-              ),
-              const SizedBox(height: 18),
-              FilledButton.icon(
-                onPressed: _isStartingScanner
-                    ? null
-                    : () => _startScanner(forceRestart: true),
-                icon: const Icon(Icons.refresh_rounded),
-                label: Text(_isStartingScanner ? 'Starting...' : 'Retry Camera'),
-                style: FilledButton.styleFrom(
-                  backgroundColor: const Color(AppColors.primary),
-                  foregroundColor: const Color(AppColors.white),
-                ),
-              ),
-            ],
+  // ── Dialogs ──────────────────────────────────────────────────────────────────
+  Future<void> _showWarning(String title, String message) {
+    return showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        shape:
+            RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        icon: const Icon(Icons.warning_amber_rounded,
+            color: Color(AppColors.warning), size: 52),
+        title: Text(title,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontWeight: FontWeight.w700)),
+        content: Text(message,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 14)),
+        actionsAlignment: MainAxisAlignment.center,
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(AppColors.primary),
+              minimumSize: const Size(120, 44),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10)),
+            ),
+            child: const Text('OK'),
           ),
-        ),
+        ],
       ),
     );
   }
 
-  Widget _buildWebScannerErrorView(String message) {
-    return Container(
-      color: Colors.black,
-      child: Center(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 28),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const Icon(
-                Icons.camera_alt_outlined,
-                size: 64,
-                color: Colors.white54,
-              ),
-              const SizedBox(height: 16),
-              Text(
-                'Scanner Unavailable',
-                style: Theme.of(context)
-                    .textTheme
-                    .bodyLarge
-                    ?.copyWith(color: Colors.white),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 8),
-              Text(
-                message,
-                textAlign: TextAlign.center,
-                style: Theme.of(context)
-                    .textTheme
-                    .bodySmall
-                    ?.copyWith(color: Colors.white70),
-              ),
-              const SizedBox(height: 18),
-              FilledButton.icon(
-                onPressed: _isStartingScanner
-                    ? null
-                    : () => _startScanner(forceRestart: true),
-                icon: const Icon(Icons.refresh_rounded),
-                label: Text(_isStartingScanner ? 'Starting...' : 'Retry Camera'),
-                style: FilledButton.styleFrom(
-                  backgroundColor: const Color(AppColors.primary),
-                  foregroundColor: const Color(AppColors.white),
-                ),
-              ),
-            ],
+  Future<void> _showSuccess(String title, String message) {
+    return showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        shape:
+            RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        icon: const Icon(Icons.check_circle_rounded,
+            color: Color(AppColors.success), size: 52),
+        title: Text(title,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontWeight: FontWeight.w700)),
+        content: Text(message,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 14)),
+        actionsAlignment: MainAxisAlignment.center,
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(AppColors.primary),
+              minimumSize: const Size(120, 44),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10)),
+            ),
+            child: const Text('OK'),
           ),
-        ),
+        ],
       ),
     );
   }
 
+  // ── Quantity picker ──────────────────────────────────────────────────────────
   Future<int?> _showQuantityPicker(ProductModel product) {
     return showModalBottomSheet<int>(
       context: context,
       backgroundColor: Colors.white,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
       builder: (ctx) {
         int qty = 1;
-
-        return StatefulBuilder(
-          builder: (ctx, setSheetState) {
-            return Padding(
-              padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    width: 40,
-                    height: 4,
-                    decoration: BoxDecoration(
+        return StatefulBuilder(builder: (ctx, setSheet) {
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // handle bar
+                Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
                       color: Colors.grey.shade300,
-                      borderRadius: BorderRadius.circular(2),
+                      borderRadius: BorderRadius.circular(2)),
+                ),
+                const SizedBox(height: 20),
+                // product row
+                Row(children: [
+                  Container(
+                    width: 50,
+                    height: 50,
+                    decoration: BoxDecoration(
+                      color:
+                          const Color(AppColors.primary).withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(12),
                     ),
+                    child: const Icon(Icons.inventory_2,
+                        color: Color(AppColors.primary)),
                   ),
-                  const SizedBox(height: 20),
-                  Row(
-                    children: [
-                      Container(
-                        width: 50,
-                        height: 50,
-                        decoration: BoxDecoration(
-                          color:
-                              const Color(AppColors.primary).withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Icon(
-                          Icons.inventory_2,
-                          color: Color(AppColors.primary),
-                        ),
-                      ),
-                      const SizedBox(width: 14),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              product.name,
-                              style: Theme.of(ctx)
-                                  .textTheme
-                                  .titleMedium
-                                  ?.copyWith(fontWeight: FontWeight.w700),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              '₱${product.price.toStringAsFixed(2)} • Stock: ${product.stock}',
-                              style: Theme.of(ctx)
-                                  .textTheme
-                                  .bodySmall
-                                  ?.copyWith(
-                                    color: const Color(AppColors.greyDark),
-                                  ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(product.name,
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 15)),
+                          const SizedBox(height: 2),
+                          Text(
+                            '₱${product.price.toStringAsFixed(2)}  •  Stock: ${product.stock}',
+                            style: TextStyle(
+                                fontSize: 13,
+                                color: Colors.grey.shade600),
+                          ),
+                        ]),
                   ),
-                  const SizedBox(height: 24),
-                  Text(
-                    'Quantity',
-                    style: Theme.of(ctx).textTheme.labelLarge?.copyWith(
-                          color: const Color(AppColors.greyDark),
-                        ),
-                  ),
-                  const SizedBox(height: 10),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      _qtyButton(
+                ]),
+                const SizedBox(height: 24),
+                Text('Quantity',
+                    style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        color: Colors.grey.shade700)),
+                const SizedBox(height: 10),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    _qtyBtn(
                         icon: Icons.remove,
                         enabled: qty > 1,
-                        onTap: () => setSheetState(() => qty--),
-                      ),
-                      const SizedBox(width: 24),
-                      Text(
-                        '$qty',
-                        style: Theme.of(ctx)
-                            .textTheme
-                            .headlineMedium
-                            ?.copyWith(fontWeight: FontWeight.w700),
-                      ),
-                      const SizedBox(width: 24),
-                      _qtyButton(
+                        onTap: () => setSheet(() => qty--)),
+                    const SizedBox(width: 28),
+                    Text('$qty',
+                        style: const TextStyle(
+                            fontSize: 28, fontWeight: FontWeight.w700)),
+                    const SizedBox(width: 28),
+                    _qtyBtn(
                         icon: Icons.add,
                         enabled: qty < product.stock,
-                        onTap: () => setSheetState(() => qty++),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 24),
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton.icon(
-                      onPressed: () => Navigator.pop(ctx, qty),
-                      icon: const Icon(Icons.add_shopping_cart),
-                      label: Text(
-                        'Add to Cart • ₱${(product.price * qty).toStringAsFixed(2)}',
-                      ),
-                      style: FilledButton.styleFrom(
-                        backgroundColor: const Color(AppColors.primary),
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
+                        onTap: () => setSheet(() => qty++)),
+                  ],
+                ),
+                const SizedBox(height: 24),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: () => Navigator.pop(ctx, qty),
+                    icon: const Icon(Icons.add_shopping_cart),
+                    label: Text(
+                        'Add to Cart  •  ₱${(product.price * qty).toStringAsFixed(2)}'),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(AppColors.primary),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12)),
                     ),
                   ),
-                ],
-              ),
-            );
-          },
-        );
+                ),
+              ],
+            ),
+          );
+        });
       },
     );
   }
 
-  Widget _qtyButton({
+  Widget _qtyBtn({
     required IconData icon,
     required bool enabled,
     required VoidCallback onTap,
@@ -711,193 +392,43 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
               : Colors.grey.shade200,
           borderRadius: BorderRadius.circular(12),
         ),
-        child: Icon(
-          icon,
-          color:
-              enabled ? const Color(AppColors.primary) : Colors.grey.shade400,
-        ),
+        child: Icon(icon,
+            color: enabled
+                ? const Color(AppColors.primary)
+                : Colors.grey.shade400),
       ),
     );
   }
 
-  void _showAddedOverlay(String productName, int qty) {
-    final overlay = Overlay.of(context);
-    late OverlayEntry entry;
-
-    final animController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1200),
-    );
-
-    final fadeAnim = Tween(begin: 1.0, end: 0.0).animate(
-      CurvedAnimation(
-        parent: animController,
-        curve: const Interval(0.6, 1.0, curve: Curves.easeOut),
-      ),
-    );
-
-    final slideAnim = Tween(begin: 0.0, end: -60.0).animate(
-      CurvedAnimation(parent: animController, curve: Curves.easeOut),
-    );
-
-    entry = OverlayEntry(
-      builder: (ctx) => Positioned(
-        top: MediaQuery.of(context).size.height * 0.35,
-        left: 0,
-        right: 0,
-        child: AnimatedBuilder(
-          animation: animController,
-          builder: (ctx, child) => Transform.translate(
-            offset: Offset(0, slideAnim.value),
-            child: Opacity(opacity: fadeAnim.value, child: child),
-          ),
-          child: Center(
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-              decoration: BoxDecoration(
-                color: const Color(AppColors.success),
-                borderRadius: BorderRadius.circular(30),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.check_circle, color: Colors.white, size: 22),
-                  const SizedBox(width: 8),
-                  Text(
-                    '$productName x$qty added!',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 15,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-
-    overlay.insert(entry);
-
-    animController.forward().then((_) {
-      entry.remove();
-      animController.dispose();
-    });
-  }
-
-  Future<void> _showWarningDialog(String title, String message) {
-    return showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-        ),
-        icon: const Icon(
-          Icons.warning_amber_rounded,
-          color: Color(AppColors.warning),
-          size: 52,
-        ),
-        title: Text(
-          title,
-          textAlign: TextAlign.center,
-          style: const TextStyle(fontWeight: FontWeight.w700),
-        ),
-        content: Text(
-          message,
-          textAlign: TextAlign.center,
-          style: const TextStyle(fontSize: 14),
-        ),
-        actionsAlignment: MainAxisAlignment.center,
-        actions: [
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx),
-            style: FilledButton.styleFrom(
-              backgroundColor: const Color(AppColors.primary),
-              minimumSize: const Size(120, 44),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(10),
-              ),
-            ),
-            child: const Text('OK'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _showSuccessDialog(String productName, int qty) {
-    return showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-        ),
-        icon: const Icon(
-          Icons.check_circle_rounded,
-          color: Color(AppColors.success),
-          size: 52,
-        ),
-        title: const Text(
-          'Added to Cart!',
-          textAlign: TextAlign.center,
-          style: TextStyle(fontWeight: FontWeight.w700),
-        ),
-        content: Text(
-          '$productName x$qty added to your cart.',
-          textAlign: TextAlign.center,
-          style: const TextStyle(fontSize: 14),
-        ),
-        actionsAlignment: MainAxisAlignment.center,
-        actions: [
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx),
-            style: FilledButton.styleFrom(
-              backgroundColor: const Color(AppColors.primary),
-              minimumSize: const Size(120, 44),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(10),
-              ),
-            ),
-            child: const Text('OK'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showProductSearch() {
+  // ── Find Product bottom sheet ────────────────────────────────────────────────
+  void _showFindProduct() {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.white,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
       builder: (ctx) {
         return DraggableScrollableSheet(
           expand: false,
           initialChildSize: 0.7,
-          maxChildSize: 0.9,
+          maxChildSize: 0.92,
           minChildSize: 0.4,
-          builder: (ctx, scrollController) {
-            return _ProductSearchSheet(
-              scrollController: scrollController,
-              firestoreService: _firestoreService,
-              onProductSelected: (product) {
-                Navigator.pop(ctx);
-                _processBarcode(product.barcode);
-              },
-            );
-          },
+          builder: (ctx, scroll) => _ProductSearchSheet(
+            scrollController: scroll,
+            firestoreService: _firestoreService,
+            onProductSelected: (product) {
+              Navigator.pop(ctx);
+              _lastScanned = null;
+              _processBarcode(product.barcode);
+            },
+          ),
         );
       },
     );
   }
 
+  // ── Build ────────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -905,106 +436,53 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
       body: SafeArea(
         child: Column(
           children: [
+            // ── Camera view (takes remaining space) ──────────────────────────
             Expanded(
               child: Stack(
                 children: [
-                  if (kIsWeb)
-                    ShopScanWebScanner(
-                      key: ValueKey(_scannerSessionId),
-                      controller: _webScannerController!,
-                      onDetected: _handleDetectedBarcodeValue,
-                      onStarted: _handleWebScannerStarted,
-                      onError: _handleWebScannerError,
-                    )
-                  else
-                    MobileScanner(
-                      key: ValueKey(_scannerSessionId),
-                      controller: _scannerController,
-                      fit: BoxFit.cover,
-                      onDetect: _handleBarcodeDetection,
-                      errorBuilder: (context, error, child) {
-                        return _buildScannerErrorView(error);
-                      },
-                      placeholderBuilder: (context, child) {
-                        return Container(
-                          color: Colors.black,
-                          child: const Center(
-                            child: CircularProgressIndicator(
-                              color: Colors.white,
-                            ),
-                          ),
-                        );
-                      },
+                  // Camera feed
+                  MobileScanner(
+                    controller: _scannerController,
+                    fit: BoxFit.cover,
+                    onDetect: _onDetect,
+                    errorBuilder: (context, error, child) =>
+                        _buildErrorView(error),
+                    placeholderBuilder: (context, child) => const Center(
+                      child:
+                          CircularProgressIndicator(color: Colors.white),
                     ),
+                  ),
 
-                  if (_webScannerErrorMessage != null && !_isStartingScanner)
-                    Positioned.fill(
-                      child: _buildWebScannerErrorView(_webScannerErrorMessage!),
-                    ),
-
-                  if (_scannerError != null && !_isStartingScanner)
-                    Positioned.fill(
-                      child: _buildScannerErrorView(_scannerError!),
-                    ),
-
+                  // Torch button (top-left)
                   Positioned(
                     top: 14,
                     left: 14,
-                    child: kIsWeb
-                        ? ValueListenableBuilder<bool>(
-                            valueListenable: _webScannerController!.torchEnabled,
-                            builder: (context, torchEnabled, _) {
-                              return GestureDetector(
-                                onTap: _toggleTorch,
-                                child: Container(
-                                  padding: const EdgeInsets.all(10),
-                                  decoration: BoxDecoration(
-                                    color: torchEnabled
-                                        ? const Color(AppColors.primary)
-                                            .withOpacity(0.9)
-                                        : Colors.black.withOpacity(0.45),
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  child: Icon(
-                                    torchEnabled
-                                        ? Icons.flashlight_off_rounded
-                                        : Icons.flashlight_on_rounded,
-                                    color: Colors.white,
-                                    size: 22,
-                                  ),
-                                ),
-                              );
-                            },
-                          )
-                        : ValueListenableBuilder<TorchState>(
-                            valueListenable: _scannerController!.torchState,
-                            builder: (context, torchState, _) {
-                              final isTorchOn = torchState == TorchState.on;
-
-                              return GestureDetector(
-                                onTap: _toggleTorch,
-                                child: Container(
-                                  padding: const EdgeInsets.all(10),
-                                  decoration: BoxDecoration(
-                                    color: isTorchOn
-                                        ? const Color(AppColors.primary)
-                                            .withOpacity(0.9)
-                                        : Colors.black.withOpacity(0.45),
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  child: Icon(
-                                    isTorchOn
-                                        ? Icons.flashlight_off_rounded
-                                        : Icons.flashlight_on_rounded,
-                                    color: Colors.white,
-                                    size: 22,
-                                  ),
-                                ),
-                              );
-                            },
+                    child: ValueListenableBuilder<TorchState>(
+                      valueListenable: _scannerController.torchState,
+                      builder: (_, state, __) => GestureDetector(
+                        onTap: _toggleTorch,
+                        child: Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: state == TorchState.on
+                                ? const Color(AppColors.primary)
+                                    .withOpacity(0.9)
+                                : Colors.black.withOpacity(0.5),
+                            borderRadius: BorderRadius.circular(12),
                           ),
+                          child: Icon(
+                            state == TorchState.on
+                                ? Icons.flashlight_off_rounded
+                                : Icons.flashlight_on_rounded,
+                            color: Colors.white,
+                            size: 22,
+                          ),
+                        ),
+                      ),
+                    ),
                   ),
 
+                  // "Align barcode" hint (top-centre)
                   Positioned(
                     top: 18,
                     left: 0,
@@ -1012,9 +490,7 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                     child: Center(
                       child: Container(
                         padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 8,
-                        ),
+                            horizontal: 16, vertical: 8),
                         decoration: BoxDecoration(
                           color: Colors.black.withOpacity(0.55),
                           borderRadius: BorderRadius.circular(20),
@@ -1022,153 +498,133 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                         child: const Text(
                           'Align barcode with frame',
                           style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w500,
-                          ),
+                              color: Colors.white,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w500),
                         ),
                       ),
                     ),
                   ),
 
+                  // Scan frame (centre)
                   Center(
-                    child: SizedBox(
+                    child: Container(
                       width: 260,
                       height: 260,
-                      child: Container(
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(
-                            color: const Color(AppColors.primary)
-                                .withOpacity(0.5),
-                            width: 2.5,
-                          ),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(
+                          color:
+                              const Color(AppColors.primary).withOpacity(0.6),
+                          width: 2.5,
                         ),
                       ),
                     ),
                   ),
 
+                  // Cart FAB (bottom-right)
                   Positioned(
                     bottom: 16,
                     right: 16,
                     child: Consumer<CartProvider>(
-                      builder: (context, cart, _) {
-                        return ScaleTransition(
-                          scale: _cartBounceAnimation!,
-                          child: GestureDetector(
-                            onTap: () {
-                              Navigator.of(context).push(
-                                MaterialPageRoute(
-                                  builder: (_) => const CartScreen(),
+                      builder: (_, cart, __) => ScaleTransition(
+                        scale: _cartScale,
+                        child: GestureDetector(
+                          onTap: () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                                builder: (_) => const CartScreen()),
+                          ),
+                          child: Container(
+                            width: 54,
+                            height: 54,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF2D2D2D),
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            child: Stack(
+                              clipBehavior: Clip.none,
+                              children: [
+                                const Center(
+                                  child: Icon(Icons.shopping_cart_rounded,
+                                      color: Colors.white, size: 26),
                                 ),
-                              );
-                            },
-                            child: Container(
-                              width: 54,
-                              height: 54,
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF2D2D2D),
-                                borderRadius: BorderRadius.circular(14),
-                              ),
-                              child: Stack(
-                                clipBehavior: Clip.none,
-                                children: [
-                                  const Center(
-                                    child: Icon(
-                                      Icons.shopping_cart_rounded,
-                                      color: Colors.white,
-                                      size: 26,
-                                    ),
-                                  ),
-                                  if (cart.itemCount > 0)
-                                    Positioned(
-                                      top: -4,
-                                      right: -4,
-                                      child: Container(
-                                        padding: const EdgeInsets.all(4),
-                                        decoration: const BoxDecoration(
-                                          color: Color(AppColors.error),
-                                          shape: BoxShape.circle,
-                                        ),
-                                        constraints: const BoxConstraints(
-                                          minWidth: 20,
-                                          minHeight: 20,
-                                        ),
-                                        child: Text(
-                                          '${cart.itemCount}',
-                                          style: const TextStyle(
+                                if (cart.itemCount > 0)
+                                  Positioned(
+                                    top: -4,
+                                    right: -4,
+                                    child: Container(
+                                      padding: const EdgeInsets.all(4),
+                                      decoration: const BoxDecoration(
+                                        color: Color(AppColors.error),
+                                        shape: BoxShape.circle,
+                                      ),
+                                      constraints: const BoxConstraints(
+                                          minWidth: 20, minHeight: 20),
+                                      child: Text(
+                                        '${cart.itemCount}',
+                                        textAlign: TextAlign.center,
+                                        style: const TextStyle(
                                             color: Colors.white,
                                             fontSize: 11,
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                          textAlign: TextAlign.center,
-                                        ),
+                                            fontWeight: FontWeight.bold),
                                       ),
                                     ),
-                                ],
-                              ),
+                                  ),
+                              ],
                             ),
                           ),
-                        );
-                      },
+                        ),
+                      ),
                     ),
                   ),
 
-                  if (_isProcessing || _isStartingScanner)
+                  // Processing indicator
+                  if (_isProcessing)
                     const Center(
-                      child: CircularProgressIndicator(color: Colors.white),
+                      child:
+                          CircularProgressIndicator(color: Colors.white),
                     ),
                 ],
               ),
             ),
 
+            // ── Bottom panel ─────────────────────────────────────────────────
             Container(
               color: const Color(0xFFF5F5F5),
               padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  // Manual input row
                   GestureDetector(
-                    onTap: () {
-                      setState(() {
-                        _showManualInput = !_showManualInput;
-                      });
-                    },
+                    onTap: () =>
+                        setState(() => _showManualInput = !_showManualInput),
                     child: Container(
                       padding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 14,
-                      ),
+                          horizontal: 16, vertical: 14),
                       decoration: BoxDecoration(
                         color: const Color(0xFFEDEDED),
                         borderRadius: BorderRadius.circular(14),
                       ),
-                      child: Row(
-                        children: [
-                          const Icon(
-                            Icons.keyboard_rounded,
-                            size: 22,
-                            color: Color(0xFF5A5A5A),
-                          ),
-                          const SizedBox(width: 12),
-                          const Expanded(
-                            child: Text(
-                              'Manual Input',
+                      child: Row(children: [
+                        const Icon(Icons.keyboard_rounded,
+                            size: 22, color: Color(0xFF5A5A5A)),
+                        const SizedBox(width: 12),
+                        const Expanded(
+                          child: Text('Manual Input',
                               style: TextStyle(
-                                fontSize: 15,
-                                fontWeight: FontWeight.w500,
-                                color: Color(0xFF333333),
-                              ),
-                            ),
-                          ),
-                          Icon(
-                            _showManualInput
-                                ? Icons.keyboard_arrow_down
-                                : Icons.chevron_right,
-                            color: const Color(0xFF999999),
-                          ),
-                        ],
-                      ),
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w500,
+                                  color: Color(0xFF333333))),
+                        ),
+                        Icon(
+                          _showManualInput
+                              ? Icons.keyboard_arrow_down
+                              : Icons.chevron_right,
+                          color: const Color(0xFF999999),
+                        ),
+                      ]),
                     ),
                   ),
 
@@ -1177,27 +633,24 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                     TextField(
                       controller: _manualController,
                       autofocus: true,
+                      keyboardType: TextInputType.text,
                       decoration: InputDecoration(
                         hintText: 'Enter barcode or SKU',
                         filled: true,
                         fillColor: Colors.white,
                         contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 12,
-                        ),
+                            horizontal: 16, vertical: 12),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(12),
                           borderSide: const BorderSide(
-                            color: Color(AppColors.borderColor),
-                          ),
+                              color: Color(AppColors.borderColor)),
                         ),
                         suffixIcon: IconButton(
                           icon: const Icon(Icons.search),
                           onPressed: () {
                             final code = _manualController.text.trim();
-
                             if (code.isNotEmpty) {
-                              _lastBarcode = null;
+                              _lastScanned = null;
                               _processBarcode(code);
                               _manualController.clear();
                             }
@@ -1205,11 +658,10 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                         ),
                       ),
                       onSubmitted: (code) {
-                        final trimmedCode = code.trim();
-
-                        if (trimmedCode.isNotEmpty) {
-                          _lastBarcode = null;
-                          _processBarcode(trimmedCode);
+                        final c = code.trim();
+                        if (c.isNotEmpty) {
+                          _lastScanned = null;
+                          _processBarcode(c);
                           _manualController.clear();
                         }
                       },
@@ -1218,65 +670,56 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
 
                   const SizedBox(height: 12),
 
+                  // Find Product button
                   SizedBox(
                     width: double.infinity,
                     child: FilledButton.icon(
-                      onPressed: _showProductSearch,
+                      onPressed: _showFindProduct,
                       icon: const Icon(Icons.search, size: 20),
-                      label: const Text(
-                        'Find Product',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
+                      label: const Text('Find Product',
+                          style: TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.w600)),
                       style: FilledButton.styleFrom(
                         backgroundColor: const Color(AppColors.primary),
                         padding: const EdgeInsets.symmetric(vertical: 16),
                         shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14),
-                        ),
+                            borderRadius: BorderRadius.circular(14)),
                       ),
                     ),
                   ),
 
-                  const SizedBox(height: 14),
+                  const SizedBox(height: 12),
 
-                  if (_lastProductLabel != null)
+                  // Status label
+                  if (_statusLabel != null)
                     Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Icon(
-                          Icons.history_rounded,
-                          size: 18,
-                          color: Colors.grey.shade500,
-                        ),
-                        const SizedBox(width: 8),
+                        Icon(Icons.history_rounded,
+                            size: 18, color: Colors.grey.shade500),
+                        const SizedBox(width: 6),
                         Flexible(
                           child: Container(
                             padding: const EdgeInsets.symmetric(
-                              horizontal: 14,
-                              vertical: 6,
-                            ),
+                                horizontal: 14, vertical: 6),
                             decoration: BoxDecoration(
                               color: Colors.grey.shade300.withOpacity(0.5),
                               borderRadius: BorderRadius.circular(20),
                             ),
                             child: Text(
-                              _lastProductLabel!,
+                              _statusLabel!,
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
-                                fontSize: 13,
-                                color: Colors.grey.shade600,
-                                fontWeight: FontWeight.w500,
-                              ),
+                                  fontSize: 13,
+                                  color: Colors.grey.shade600,
+                                  fontWeight: FontWeight.w500),
                             ),
                           ),
                         ),
                       ],
                     ),
 
-                  const SizedBox(height: 10),
+                  const SizedBox(height: 6),
                 ],
               ),
             ),
@@ -1285,18 +728,60 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
       ),
     );
   }
+
+  // ── Camera error view ────────────────────────────────────────────────────────
+  Widget _buildErrorView(MobileScannerException error) {
+    return Container(
+      color: Colors.black,
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 28),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.camera_alt_outlined,
+                  size: 64, color: Colors.white54),
+              const SizedBox(height: 16),
+              const Text('Camera Unavailable',
+                  style: TextStyle(color: Colors.white, fontSize: 16),
+                  textAlign: TextAlign.center),
+              const SizedBox(height: 8),
+              const Text(
+                  'Check camera permissions, then tap Retry.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.white60, fontSize: 13)),
+              const SizedBox(height: 18),
+              FilledButton.icon(
+                onPressed: () => _scannerController.start(),
+                icon: const Icon(Icons.refresh_rounded),
+                label: const Text('Retry Camera'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(AppColors.primary),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10)),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Product search bottom sheet
+// ═══════════════════════════════════════════════════════════════════════════════
 class _ProductSearchSheet extends StatefulWidget {
-  final ScrollController scrollController;
-  final FirestoreService firestoreService;
-  final void Function(ProductModel product) onProductSelected;
-
   const _ProductSearchSheet({
     required this.scrollController,
     required this.firestoreService,
     required this.onProductSelected,
   });
+
+  final ScrollController scrollController;
+  final FirestoreService firestoreService;
+  final void Function(ProductModel product) onProductSelected;
 
   @override
   State<_ProductSearchSheet> createState() => _ProductSearchSheetState();
@@ -1304,7 +789,6 @@ class _ProductSearchSheet extends StatefulWidget {
 
 class _ProductSearchSheetState extends State<_ProductSearchSheet> {
   final _searchController = TextEditingController();
-
   List<ProductModel> _results = [];
   bool _loading = false;
   String _query = '';
@@ -1315,9 +799,8 @@ class _ProductSearchSheetState extends State<_ProductSearchSheet> {
     super.dispose();
   }
 
-  void _search(String query) async {
+  Future<void> _search(String query) async {
     _query = query.trim().toLowerCase();
-
     if (_query.isEmpty) {
       setState(() => _results = []);
       return;
@@ -1327,23 +810,13 @@ class _ProductSearchSheetState extends State<_ProductSearchSheet> {
 
     try {
       final shopId = context.read<AuthProvider>().currentUser?.shopId;
-
-      final results = await widget.firestoreService.searchProducts(
-        _query,
-        shopId: shopId,
-      );
-
-      if (mounted) {
-        setState(() => _results = results);
-      }
+      final results = await widget.firestoreService
+          .searchProducts(_query, shopId: shopId);
+      if (mounted) setState(() => _results = results);
     } catch (_) {
-      if (mounted) {
-        setState(() => _results = []);
-      }
-    }
-
-    if (mounted) {
-      setState(() => _loading = false);
+      if (mounted) setState(() => _results = []);
+    } finally {
+      if (mounted) setState(() => _loading = false);
     }
   }
 
@@ -1353,23 +826,19 @@ class _ProductSearchSheetState extends State<_ProductSearchSheet> {
       padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
       child: Column(
         children: [
+          // Handle bar
           Container(
             width: 40,
             height: 4,
             decoration: BoxDecoration(
-              color: Colors.grey.shade300,
-              borderRadius: BorderRadius.circular(2),
-            ),
+                color: Colors.grey.shade300,
+                borderRadius: BorderRadius.circular(2)),
           ),
           const SizedBox(height: 16),
-          Text(
-            'Find Product',
-            style: Theme.of(context)
-                .textTheme
-                .titleLarge
-                ?.copyWith(fontWeight: FontWeight.w700),
-          ),
+          const Text('Find Product',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
           const SizedBox(height: 14),
+          // Search field
           TextField(
             controller: _searchController,
             autofocus: true,
@@ -1379,13 +848,12 @@ class _ProductSearchSheetState extends State<_ProductSearchSheet> {
               filled: true,
               fillColor: const Color(0xFFF2F2F2),
               border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide.none,
-              ),
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide.none),
             ),
             onChanged: _search,
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           if (_loading) const LinearProgressIndicator(),
           Expanded(
             child: _results.isEmpty
@@ -1400,40 +868,32 @@ class _ProductSearchSheetState extends State<_ProductSearchSheet> {
                 : ListView.separated(
                     controller: widget.scrollController,
                     itemCount: _results.length,
-                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    separatorBuilder: (_, __) =>
+                        const Divider(height: 1),
                     itemBuilder: (ctx, i) {
                       final p = _results[i];
-
                       return ListTile(
                         leading: Container(
                           width: 42,
                           height: 42,
                           decoration: BoxDecoration(
-                            color:
-                                const Color(AppColors.primary).withOpacity(0.1),
+                            color: const Color(AppColors.primary)
+                                .withOpacity(0.1),
                             borderRadius: BorderRadius.circular(10),
                           ),
-                          child: const Icon(
-                            Icons.inventory_2,
-                            color: Color(AppColors.primary),
-                            size: 20,
-                          ),
+                          child: const Icon(Icons.inventory_2,
+                              color: Color(AppColors.primary), size: 20),
                         ),
-                        title: Text(
-                          p.name,
-                          style: const TextStyle(fontWeight: FontWeight.w600),
-                        ),
+                        title: Text(p.name,
+                            style: const TextStyle(
+                                fontWeight: FontWeight.w600)),
                         subtitle: Text(
-                          '₱${p.price.toStringAsFixed(2)} • Stock: ${p.stock}',
+                          '₱${p.price.toStringAsFixed(2)}  •  Stock: ${p.stock}',
                           style: TextStyle(
-                            color: Colors.grey.shade600,
-                            fontSize: 13,
-                          ),
+                              color: Colors.grey.shade600, fontSize: 13),
                         ),
-                        trailing: const Icon(
-                          Icons.add_circle_outline,
-                          color: Color(AppColors.primary),
-                        ),
+                        trailing: const Icon(Icons.add_circle_outline,
+                            color: Color(AppColors.primary)),
                         onTap: () => widget.onProductSelected(p),
                       );
                     },
