@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <!--
+    If you are serving your web app in a path other than the root, change the
+    href value below to reflect the base path you are serving from.
+
+    The path provided below has to start and end with a slash "/" in order for
+    it to work correctly.
+
+    For more details:
+    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+
+    This is a placeholder for base href that will be replaced by the value of
+    the `--base-href` argument provided to `flutter build`.
+  -->
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="A new Flutter project.">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="shopscan">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <!-- Google Sign-In -->
+  <meta name="google-signin-client_id" content="1064900477063-ric6ti4l1ms2gjsct3vj1tkftqnsae4h.apps.googleusercontent.com">
+
+  <!-- ZXing barcode detection library — required by mobile_scanner for web -->
+  <script src="https://unpkg.com/@zxing/library@0.19.1/umd/index.min.js"></script>
+  <script src="shopscan_web_scanner.js"></script>
+
+  <link rel="manifest" href="manifest.json">
+</head>
+<body>
+  <div id="fb-root"></div>
+
+  <!-- Facebook SDK initialization MUST happen first -->
+  <script>
+    // Initialize FB before SDK loads
+    window.fbAsyncInit = function() {
+      console.log('✅ Facebook SDK is now available');
+      if (typeof FB !== 'undefined') {
+        FB.init({
+          appId: '1245050811142020',
+          xfbml: true,
+          version: 'v18.0',
+          status: true,
+          cookie: true
+        });
+      }
+    };
+
+    // Direct function for Flutter to call
+    window.facebookLoginDirect = function(callback) {
+      if (typeof FB === 'undefined') {
+        console.error('❌ FB is not defined. SDK not loaded.');
+        callback(JSON.stringify({status: 'error', error: 'FB SDK not loaded'}));
+        return;
+      }
+
+      FB.login(function(response) {
+        console.log('Facebook login response:', response);
+        callback(JSON.stringify(response));
+      }, {scope: 'public_profile,email'});
+    };
+  </script>
+
+  <!-- Facebook SDK - Load asynchronously -->
+  <script async defer crossorigin="anonymous"
+    src="https://connect.facebook.net/en_US/sdk.js#xfbml=1&version=v18.0&appId=1245050811142020">
+  </script>
+
+  <!--
+    You can customize the "flutter_bootstrap.js" script.
+    This is useful to provide a custom configuration to the Flutter loader
+    or to give the user feedback during the initialization process.
+
+    For more details:
+    * https://docs.flutter.dev/platform-integration/web/initialization
+  -->
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>

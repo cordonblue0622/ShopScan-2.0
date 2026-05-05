@@ -1,0 +1,237 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function currentUserExists() {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function currentUserIsOwner() {
+      return currentUserExists() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'owner';
+    }
+
+    function currentUserShopId() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.shopId;
+    }
+
+    function isSelf(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    function canReadUserProfile(userId) {
+      return isSelf(userId) ||
+        currentUserIsOwner() ||
+        (
+          currentUserExists() &&
+          exists(/databases/$(database)/documents/users/$(userId)) &&
+          get(/databases/$(database)/documents/users/$(userId)).data.role == 'owner' &&
+          get(/databases/$(database)/documents/users/$(userId)).data.shopId == currentUserShopId()
+        );
+    }
+
+    function isSelfProfileUpdate() {
+      return request.resource.data.id == resource.data.id &&
+        request.resource.data.email == resource.data.email &&
+        request.resource.data.role == resource.data.role &&
+        request.resource.data.shopId == resource.data.shopId &&
+        request.resource.data.createdAt == resource.data.createdAt &&
+        request.resource.data.isActive == resource.data.isActive &&
+        request.resource.data.assignedShiftLabel == resource.data.assignedShiftLabel &&
+        request.resource.data.assignedShiftStart == resource.data.assignedShiftStart &&
+        request.resource.data.assignedShiftEnd == resource.data.assignedShiftEnd;
+    }
+
+    function isOwnerManagingCashier() {
+      return currentUserIsOwner() &&
+        resource.data.role == 'cashier' &&
+        resource.data.shopId == currentUserShopId() &&
+        request.resource.data.id == resource.data.id &&
+        request.resource.data.role == resource.data.role &&
+        request.resource.data.email == resource.data.email &&
+        request.resource.data.createdAt == resource.data.createdAt &&
+        (
+          request.resource.data.shopId == resource.data.shopId ||
+          request.resource.data.shopId == null
+        );
+    }
+
+    function isOwnerCreatingCashier(userId) {
+      return currentUserIsOwner() &&
+        request.resource.data.id == userId &&
+        request.resource.data.role == 'cashier' &&
+        request.resource.data.shopId == currentUserShopId() &&
+        request.resource.data.isActive == true;
+    }
+
+    function isSelfCreatingProfile(userId) {
+      return isSelf(userId) &&
+        request.resource.data.id == userId &&
+        (
+          (request.resource.data.role == 'owner' && request.resource.data.shopId == userId) ||
+          (request.resource.data.role == 'cashier' && request.resource.data.shopId == null)
+        );
+    }
+
+    function canReadShop(shopId) {
+      return signedIn() && (
+        resource.data.ownerId == request.auth.uid ||
+        (currentUserExists() && currentUserShopId() == shopId)
+      );
+    }
+
+    function isOwnerShopWrite(shopId) {
+      return signedIn() &&
+        request.resource.data.id == shopId &&
+        request.resource.data.ownerId == request.auth.uid;
+    }
+
+    function isStockOnlyUpdate() {
+      return signedIn() &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'stock',
+          'updatedAt',
+        ]) &&
+        request.resource.data.stock is int &&
+        request.resource.data.stock >= 0 &&
+        request.resource.data.updatedAt is string;
+    }
+
+    function productBelongsToCurrentShop(data) {
+      return currentUserExists() &&
+        data.shopId is string &&
+        data.shopId == currentUserShopId();
+    }
+
+    function isValidProductCreate() {
+      return currentUserIsOwner() &&
+        productBelongsToCurrentShop(request.resource.data) &&
+        request.resource.data.name is string &&
+        request.resource.data.barcode is string &&
+        request.resource.data.price is number &&
+        request.resource.data.stock is int &&
+        request.resource.data.category is string &&
+        request.resource.data.createdAt is string &&
+        request.resource.data.updatedAt is string;
+    }
+
+    function isOwnerProductUpdate() {
+      return currentUserIsOwner() &&
+        productBelongsToCurrentShop(resource.data) &&
+        request.resource.data.shopId == resource.data.shopId &&
+        request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    function isOwnTransaction() {
+      return signedIn() && resource.data.cashierId == request.auth.uid;
+    }
+
+    function isValidTransactionCreate() {
+      return signedIn() &&
+        request.resource.data.cashierId == request.auth.uid &&
+        request.resource.data.total is number &&
+        request.resource.data.timestamp is string;
+    }
+
+    function isOwnShift() {
+      return signedIn() && resource.data.cashierId == request.auth.uid;
+    }
+
+    function isApprovalParticipant() {
+      return currentUserExists() && (
+        resource.data.requesterId == request.auth.uid ||
+        resource.data.approverId == request.auth.uid
+      );
+    }
+
+    function isValidApprovalRequestCreate() {
+      return currentUserExists() &&
+        request.resource.data.requesterId == request.auth.uid &&
+        request.resource.data.shopId == currentUserShopId() &&
+        request.resource.data.requesterEmail ==
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.email &&
+        request.resource.data.requesterRole ==
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.createdAt is string;
+    }
+
+    function isValidApprovalRequestUpdate() {
+      return currentUserExists() &&
+        resource.data.approverId == request.auth.uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status',
+          'resolvedAt',
+          'resolvedByName',
+        ]) &&
+        request.resource.data.status in ['approved', 'declined'];
+    }
+
+    function isValidShiftCreate() {
+      return signedIn() &&
+        request.resource.data.cashierId == request.auth.uid &&
+        request.resource.data.startTime is string;
+    }
+
+    match /users/{userId} {
+      allow read: if canReadUserProfile(userId);
+
+      allow create: if isSelfCreatingProfile(userId) || isOwnerCreatingCashier(userId);
+
+      allow update: if (isSelf(userId) && isSelfProfileUpdate()) || isOwnerManagingCashier();
+
+      allow delete: if isSelf(userId);
+    }
+
+    match /shops/{shopId} {
+      allow read: if canReadShop(shopId);
+
+      allow create: if isOwnerShopWrite(shopId);
+
+      allow update: if signedIn() &&
+        resource.data.ownerId == request.auth.uid &&
+        request.resource.data.id == resource.data.id &&
+        request.resource.data.ownerId == resource.data.ownerId &&
+        request.resource.data.createdAt == resource.data.createdAt;
+
+      allow delete: if signedIn() && resource.data.ownerId == request.auth.uid;
+    }
+
+    match /products/{productId} {
+      allow read: if productBelongsToCurrentShop(resource.data);
+      allow create: if isValidProductCreate();
+      allow update: if isOwnerProductUpdate() ||
+        (productBelongsToCurrentShop(resource.data) && isStockOnlyUpdate());
+      allow delete: if currentUserIsOwner() && productBelongsToCurrentShop(resource.data);
+    }
+
+    match /transactions/{transactionId} {
+      allow create: if isValidTransactionCreate();
+      allow read: if currentUserIsOwner() || isOwnTransaction();
+      allow update, delete: if currentUserIsOwner();
+    }
+
+    match /shifts/{shiftId} {
+      allow create: if isValidShiftCreate();
+      allow read: if currentUserIsOwner() || isOwnShift();
+      allow update: if currentUserIsOwner() || (
+        isOwnShift() &&
+        request.resource.data.id == resource.data.id &&
+        request.resource.data.cashierId == resource.data.cashierId &&
+        request.resource.data.startTime == resource.data.startTime
+      );
+      allow delete: if currentUserIsOwner();
+    }
+
+    match /approval_requests/{requestId} {
+      allow create: if isValidApprovalRequestCreate();
+      allow read: if isApprovalParticipant();
+      allow update: if isValidApprovalRequestUpdate();
+      allow delete: if false;
+    }
+  }
+}
