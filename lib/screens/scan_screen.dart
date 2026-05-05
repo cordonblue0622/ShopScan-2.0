@@ -43,6 +43,7 @@ class _ScanScreenState extends State<ScanScreen>
     super.initState();
 
     _scannerController = MobileScannerController(
+      autoStart: false,
       detectionSpeed: DetectionSpeed.normal,
       formats: const [
         BarcodeFormat.ean13,
@@ -57,6 +58,10 @@ class _ScanScreenState extends State<ScanScreen>
         BarcodeFormat.qrCode,
       ],
     );
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _scannerController.start();
+    });
 
     _cartBounce = AnimationController(
       vsync: this,
@@ -752,7 +757,10 @@ class _ScanScreenState extends State<ScanScreen>
                   style: TextStyle(color: Colors.white60, fontSize: 13)),
               const SizedBox(height: 18),
               FilledButton.icon(
-                onPressed: () => _scannerController.start(),
+                onPressed: () async {
+                  await _scannerController.stop();
+                  await _scannerController.start();
+                },
                 icon: const Icon(Icons.refresh_rounded),
                 label: const Text('Retry Camera'),
                 style: FilledButton.styleFrom(
