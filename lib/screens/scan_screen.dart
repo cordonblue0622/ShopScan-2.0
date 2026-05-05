@@ -310,7 +310,10 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
       _lastProductLabel = 'Start your shift before scanning items';
     });
 
-    _showErrorSnack('Start your shift first before scanning items.');
+    await _showWarningDialog(
+      'Not On Duty',
+      'You need to start your shift before scanning items.',
+    );
     return false;
   }
 
@@ -343,7 +346,10 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
       });
 
       _resetLastBarcodeAfterDelay(normalizedBarcode);
-      _showErrorSnack('No shop assigned to this account.');
+      await _showWarningDialog(
+        'No Shop Assigned',
+        'No shop is assigned to this account. Please contact your administrator.',
+      );
       return;
     }
 
@@ -365,7 +371,10 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
         });
 
         _resetLastBarcodeAfterDelay(normalizedBarcode);
-        _showErrorSnack('Product not added. Barcode not found in inventory.');
+        await _showWarningDialog(
+          'Product Not Found',
+          'Barcode "$normalizedBarcode" was not found in your inventory.',
+        );
         return;
       }
 
@@ -377,7 +386,10 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
         });
 
         _resetLastBarcodeAfterDelay(normalizedBarcode);
-        _showErrorSnack('${product.name} is out of stock');
+        await _showWarningDialog(
+          'Out of Stock',
+          '${product.name} is currently out of stock.',
+        );
         return;
       }
 
@@ -404,12 +416,12 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
       _cartBounceController?.forward(from: 0);
 
       if (mounted) {
-        _showAddedOverlay(product.name, quantity);
-
         setState(() {
           _lastProductLabel =
               'Last: ${product.name} (₱${product.price.toStringAsFixed(2)})';
         });
+
+        await _showSuccessDialog(product.name, quantity);
       }
 
       _lastBarcode = null;
@@ -775,6 +787,88 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
     });
   }
 
+  Future<void> _showWarningDialog(String title, String message) {
+    return showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+        ),
+        icon: const Icon(
+          Icons.warning_amber_rounded,
+          color: Color(AppColors.warning),
+          size: 52,
+        ),
+        title: Text(
+          title,
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontWeight: FontWeight.w700),
+        ),
+        content: Text(
+          message,
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontSize: 14),
+        ),
+        actionsAlignment: MainAxisAlignment.center,
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(AppColors.primary),
+              minimumSize: const Size(120, 44),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showSuccessDialog(String productName, int qty) {
+    return showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+        ),
+        icon: const Icon(
+          Icons.check_circle_rounded,
+          color: Color(AppColors.success),
+          size: 52,
+        ),
+        title: const Text(
+          'Added to Cart!',
+          textAlign: TextAlign.center,
+          style: TextStyle(fontWeight: FontWeight.w700),
+        ),
+        content: Text(
+          '$productName x$qty added to your cart.',
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontSize: 14),
+        ),
+        actionsAlignment: MainAxisAlignment.center,
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(AppColors.primary),
+              minimumSize: const Size(120, 44),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _showProductSearch() {
     showModalBottomSheet(
       context: context,
@@ -941,20 +1035,15 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                     child: SizedBox(
                       width: 260,
                       height: 260,
-                      child: Stack(
-                        children: [
-                          Container(
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(20),
-                              border: Border.all(
-                                color: const Color(AppColors.primary)
-                                    .withOpacity(0.5),
-                                width: 2.5,
-                              ),
-                            ),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: const Color(AppColors.primary)
+                                .withOpacity(0.5),
+                            width: 2.5,
                           ),
-                          _ScanLineAnimation(),
-                        ],
+                        ),
                       ),
                     ),
                   ),
@@ -1194,58 +1283,6 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
           ],
         ),
       ),
-    );
-  }
-}
-
-class _ScanLineAnimation extends StatefulWidget {
-  @override
-  State<_ScanLineAnimation> createState() => _ScanLineAnimationState();
-}
-
-class _ScanLineAnimationState extends State<_ScanLineAnimation>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 2),
-    )..repeat(reverse: true);
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, child) {
-        return Positioned(
-          top: _controller.value * 240 + 10,
-          left: 10,
-          right: 10,
-          child: Container(
-            height: 2,
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [
-                  Colors.transparent,
-                  const Color(AppColors.primary).withOpacity(0.8),
-                  Colors.transparent,
-                ],
-              ),
-            ),
-          ),
-        );
-      },
     );
   }
 }
