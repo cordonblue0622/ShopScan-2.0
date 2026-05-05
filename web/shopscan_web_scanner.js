@@ -2,6 +2,19 @@
   const ZXing = window.ZXing;
   const scanners = new Map();
 
+  // Patch CanvasRenderingContext2D so ZXing's getImageData calls use
+  // willReadFrequently, which avoids the browser performance warning and
+  // ensures the canvas is in a fast CPU-readable mode for every decode frame.
+  (function patchCanvas() {
+    const origGetContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type, attrs) {
+      if (type === '2d') {
+        attrs = Object.assign({ willReadFrequently: true }, attrs || {});
+      }
+      return origGetContext.call(this, type, attrs);
+    };
+  })();
+
   function wait(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
@@ -238,6 +251,13 @@
               state.detectionVersion += 1;
               clearError(state);
               console.info('[shopScanScanner] detected barcode:', detectedValue);
+              // Reset the last-detected value after a cooldown so the same
+              // barcode can be re-scanned (e.g. adding multiple of same item).
+              setTimeout(function () {
+                if (state.detectedValue === detectedValue) {
+                  state.detectedValue = '';
+                }
+              }, 1500);
             }
           }
 
